@@ -1,0 +1,86 @@
+---
+title: "EDA"
+output: html_notebook
+---
+
+```{r message=FALSE}
+library(here)
+library(data.table)
+library(ggplot2)
+library(gridExtra)
+```
+
+Reading data
+
+```{r}
+shots <- readRDS(here("data", "processed", "model-data.rds"))
+shots <- as.data.table(shots)
+features <- names(shots)[c(2, 15:68)]
+```
+
+All features
+
+```{r}
+features
+```
+
+Character features
+
+```{r fig.width=9.5, fig.height=28.5}
+fchars <-  names(shots)[lapply(shots, is.character) == TRUE]
+fints <- names(shots)[lapply(shots, is.integer) == TRUE]
+ffcts <- setdiff(intersect(features, c(fchars, fints)), "goal")
+
+plots <- vector("list", length(ffcts))
+df <- copy(shots)
+df <- df[, lapply(.SD, factor, exclude = NULL), .SDcols = ffcts]
+df$goal <- shots$goal
+
+for (i in seq_along(ffcts)) {
+  v <- ffcts[i]
+  tmp <- df[ , .(.N, m = mean(goal)), by = v][, pct := N / sum(N)]
+  plots[[i]] <- ggplot(tmp, aes_string(v, "m")) +
+    geom_point() +
+    geom_col(aes(y = pct), fill = NA, colour = "black") +
+    theme(axis.text.x = element_text(size = 6)) +
+    ylim(0, 1)
+}
+
+rm(v, df, tmp, i)
+
+do.call("grid.arrange", c(plots, ncol = 2))
+```
+
+Numeric features
+
+```{r fig.width=9.5, fig.height=25}
+fnums <-  names(shots)[lapply(shots, is.double) == TRUE]
+fnums <- intersect(features, fnums)
+  
+plots <- vector("list", length(fnums))
+df <- copy(shots)
+df <- df[, lapply(.SD, cut_interval, n = 30), .SDcols = fnums]
+df$goal <- shots$goal
+
+for (i in seq_along(fnums)) {
+  v <- fnums[i]
+  tmp <- df[ , .(.N, m = mean(goal)), by = v][, pct := N / sum(N)]
+  plots[[i]] <- ggplot(tmp, aes_string(v, "m")) +
+    geom_point() +
+    geom_col(aes(y = pct), fill = NA, colour = "black") +
+    theme(axis.text.x = element_text(size = 6)) +
+    scale_x_discrete(breaks = levels(tmp[[1]])[seq(1, 30, by = 6)]) +
+    ylim(0, 1)
+}
+
+rm(v, df, tmp, i)
+
+do.call("grid.arrange", c(plots, ncol = 2))
+```
+
+
+
+
+
+
+

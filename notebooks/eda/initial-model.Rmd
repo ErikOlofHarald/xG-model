@@ -1,0 +1,146 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r message=FALSE}
+library(here)
+library(data.table)
+library(ggplot2)
+library(gridExtra)
+library(xgboost)
+library(xgboostExplainer)
+```
+
+Reading data
+
+```{r}
+shots <- readRDS(here("data", "processed", "model-data.rds"))
+shots <- as.data.table(shots)
+features <- names(shots)[c(2, 15:66)]
+fchars <- names(shots)[lapply(shots, is.character) == TRUE]
+fchars <- c(fchars, grep("zone", features, value = TRUE))
+fchars <- intersect(features, fchars)
+```
+
+Quick model
+
+```{r}
+features
+```
+
+* n_shots: used for correcting probability
+* second_start: have match second
+
+```{r}
+drops <- c("n_shots", "second_start", "zone_id", "zone_start_id", "pass_1_zone_id", "pass_2_zone_id")
+features <- setdiff(features, drops)
+fchars <- intersect(fchars, features)
+fnums <- setdiff(features, fchars)
+```
+
+
+```{r}
+one_hot <- shots[, ..fchars]
+one_hot[] <- lapply(one_hot, as.factor)
+ff <-  ~ . - 1
+mf <- model.frame(formula = ff, data = one_hot, na.action = na.pass)
+fac_mat <- model.matrix(
+  object = ff,
+  data = mf,
+  contrasts.arg = Map(function(x) contrasts(x, contrasts = FALSE), mf)
+)
+fac_mat <- as.data.table(fac_mat)
+
+model_data <- cbind(fac_mat, shots[, ..fnums])
+
+test_idx <- which(shots$league == "Sweden. Allsvenskan" & shots$season == 2018)
+train <- model_data[-test_idx]
+test <- model_data[test_idx]
+
+dtrain <- xgb.DMatrix(data = data.matrix(train), label = shots$goal[-test_idx], missing = NA)
+dtest <- xgb.DMatrix(data = data.matrix(test), label = shots$goal[test_idx], missing = NA)
+
+params <- list(booster = "gbtree", objective = "binary:logistic", eta = 0.1,
+  gamma = 10, max_depth = 6, min_child_weight = 1, subsample = 0.8,
+  colsample_bytree = 0.8)
+
+set.seed(1)
+cv <- xgb.cv(
+  params = params,
+  data = dtrain,
+  nrounds = 1000,
+  early_stopping_rounds = 10,
+  print_every_n = 25,
+  nfold = 10,
+  stratified = TRUE,
+  metrics = list("auc"),
+  prediction = TRUE
+)
+```
+
+```{r}
+mod <- xgb.train(
+  params = params,
+  data = dtrain,
+  nrounds = cv$best_iteration
+)
+```
+
+
+
+```{r fig.width=9.5, fig.height=9.5}
+imp <- xgb.importance(model = mod, feature_names = colnames(dtrain))
+ggplot(imp, aes(reorder(Feature, Gain), Gain)) + geom_col() + coord_flip()
+```
+
+```{r}
+preds <- shots[-test_idx]
+preds[, pred := cv$pred]
+preds[, .(goals = sum(goal), xG = sum(pred)), by = .(league)]
+```
+
+```{r}
+by_team <- preds[, .(goals = sum(goal), xG = sum(pred)), by = .(league, team_id)]
+# swe <- by_team[league == "Sweden. Allsvenskan", ]
+eqn <- lm(goals ~ xG, data = by_team)
+r2 <- summary(eqn)$r.squared
+ggplot(by_team, aes(xG, goals)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  geom_abline(slope = 1, intercept = 0, colour = "red") +
+  labs(title = round(r2, digits = 3))
+```
+
+```{r}
+explainer <- buildExplainer(mod, dtrain, "binary", 0.5)
+```
+
+```{r}
+breakdown <- explainPredictions(mod, explainer, dtrain)
+```
+
+```{r fig.width=9.5, fig.height=27}
+imp_features <- imp[["Feature"]]
+plots <- vector("list", length(imp_features))
+for (i in seq_along(imp_features)){
+  f <- imp_features[i]
+  d <- data.table(x = train[[f]], y = breakdown[[f]])
+  if (f %in% fchars) {
+    p <- ggplot(d, aes(x, y)) + geom_boxplot()
+  } else {
+    p <- ggplot(d, aes(x, y)) + geom_point(na.rm = TRUE)
+  }
+  plots[[i]] <- p + labs(x = "", y = "", title = f)
+}
+do.call("grid.arrange", c(plots, ncol = 4))
+```
+
+```{r}
+preds[, .(.N, goals = mean(goal), xG = mean(pred)), by = standart]
+```
+
+```{r}
+preds[, .(.N, goals = mean(goal), xG = mean(pred)), by = attack_type]
+```
+

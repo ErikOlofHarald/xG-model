@@ -1,0 +1,238 @@
+---
+title: "Model v2"
+output: html_notebook
+---
+
+* Add cross indicator
+* Train with another metric, e.g. rmse instead of AUC. Will this help calibration?
+* Split Corner attack, penalty and other?
+* Gamma to high? Try tuning, still underestimate on penalties?
+
+```{r message=FALSE}
+library(here)
+library(data.table)
+library(ggplot2)
+library(gridExtra)
+library(xgboost)
+library(xgboostExplainer)
+```
+
+Reading data
+
+```{r}
+shots <- readRDS(here("data", "processed", "model-data.rds"))
+shots <- as.data.table(shots)
+features <- names(shots)[c(2, 15:68)]
+fchars <- names(shots)[lapply(shots, is.character) == TRUE]
+fchars <- c(fchars, grep("zone", features, value = TRUE))
+fchars <- intersect(features, fchars)
+```
+
+Quick model
+
+```{r}
+features
+```
+
+* n_shots: used for correcting probability
+* second_start: have match second
+
+```{r}
+drops <- c("n_shots", "second_start", "zone_start_id", "zone_id", "pass_1_zone_id", "pass_2_zone_id")
+# drops = c("n_shots")
+features <- setdiff(features, drops)
+fchars <- intersect(fchars, features)
+fnums <- setdiff(features, fchars)
+```
+
+Test - train split
+
+```{r}
+test_idx <- which(shots$league == "Sweden. Allsvenskan" & shots$season == 2018)
+train <- shots[-test_idx]
+test <- shots[test_idx]
+```
+
+Folds - create stratified sample
+
+```{r}
+set.seed(1)
+y <- train[["goal"]]
+v <- seq(length(y))
+s0 <- v[y == 0]
+s0 <- split(s0, list(fold = sample(10, length(s0), replace = TRUE)))
+s1 <- v[y == 1]
+s1 <- split(s1, list(fold = sample(10, length(s1), replace = TRUE)))
+folds <- Map("c", s1, s0)
+folds_idx <- do.call("c", folds)
+rm(y, v, s0, s1)
+```
+
+Mean encoding
+
+```{r}
+# get_encoding <- function(x, y) {
+#   v <- aggregate(y, list(grp = x), mean, na.rm = FALSE)
+#   setNames(v$x, v$grp)
+# }
+
+set.seed(1)
+get_encoding <- function(x, y) {
+  s <- sample(1:10, length(x), replace = TRUE)
+  v <- aggregate(y, list(grp = x, k = s), mean, na.rm = FALSE)
+  v <- aggregate(v$x, list(grp = v$grp), mean, na.rm = FALSE)
+  setNames(v$x, v$grp)
+}
+
+set_encoding <- function(x, z) {
+  unname(z[x])
+}
+
+train_encoded <- vector("list", length(folds))
+for (k in seq_along(folds)) {
+  idx <- folds[[k]]
+  d <- train[-idx]
+  oof <- train[idx]
+  y <- d[["goal"]]
+  for (v in fchars) {
+    dic <- get_encoding(d[[v]], y)
+    oof[, (v) := set_encoding(get(v), dic)]
+  }
+  train_encoded[[k]] <- oof
+}
+train_encoded <- rbindlist(train_encoded)
+train <- train[folds_idx]
+rm(k, idx, d, oof, y, v, dic)
+```
+
+Model  data
+
+```{r}
+dtrain <- xgb.DMatrix(data = data.matrix(train_encoded[, ..features]), label = train_encoded$goal, missing = NA)
+
+params <- list(booster = "gbtree", objective = "binary:logistic", eta = 0.1,
+  gamma = 10, max_depth = 6, min_child_weight = 1, subsample = 0.8,
+  colsample_bytree = 0.8)
+
+cv <- xgb.cv(
+  params = params,
+  data = dtrain,
+  nrounds = 1000,
+  early_stopping_rounds = 10,
+  print_every_n = 25,
+  folds = folds,
+  metrics = list("auc", "rmse"),
+  prediction = TRUE
+)
+```
+
+Train model with nrounds
+
+```{r}
+mod <- xgb.train(
+  params = params,
+  data = dtrain,
+  nrounds = cv$best_iteration
+)
+```
+
+Variable importance
+
+```{r fig.width=9.5, fig.height=9.5}
+imp <- xgb.importance(model = mod, feature_names = colnames(dtrain))
+ggplot(imp, aes(reorder(Feature, Gain), Gain)) + geom_col() + coord_flip()
+```
+
+```{r}
+preds <- copy(train)
+preds[, pred := cv$pred]
+preds[, .(goals = sum(goal), xG = sum(pred)), by = .(league)]
+```
+
+```{r}
+by_team <- preds[, .(goals = sum(goal), xG = sum(pred)), by = .(league, team_id)]
+# swe <- by_team[league == "Sweden. Allsvenskan", ]
+eqn <- lm(goals ~ xG, data = by_team)
+r2 <- summary(eqn)$r.squared
+ggplot(by_team, aes(xG, goals)) +
+  geom_point(aes(colour = league)) +
+  geom_smooth(method = "lm", se = FALSE) +
+  geom_abline(slope = 1, intercept = 0, colour = "red") +
+  labs(title = round(r2, digits = 3))
+```
+
+Build explainer
+
+```{r}
+explainer <- buildExplainer(mod, dtrain, "binary", 0.5)
+```
+
+Breakdown predictions
+
+```{r}
+breakdown <- explainPredictions(mod, explainer, dtrain)
+```
+
+```{r fig.width=9.5, fig.height=27}
+imp_features <- imp[["Feature"]]
+plots <- vector("list", length(imp_features))
+for (i in seq_along(imp_features)){
+  f <- imp_features[i]
+  d <- data.table(x = train[[f]], y = breakdown[[f]])
+  if (f %in% fchars) {
+    p <- ggplot(d, aes(x, y)) + geom_boxplot()
+  } else {
+    p <- ggplot(d, aes(x, y)) + geom_point(na.rm = TRUE)
+  }
+  plots[[i]] <- p + labs(x = "", y = "", title = f)
+}
+
+do.call("grid.arrange", c(plots, ncol = 3))
+```
+
+```{r}
+preds[, .(.N, goals = mean(goal), xG = mean(pred)), by = standart]
+```
+
+```{r}
+preds[, .(.N, goals = mean(goal), xG = mean(pred)), by = attack_type]
+```
+
+```{r}
+library(rBayesianOptimization)
+
+xgb_cv_bayes <- function(gamma) {
+  params <- list(booster = "gbtree", objective = "binary:logistic", eta = 0.1,
+    gamma = gamma, max_depth = 6, min_child_weight = 1, subsample = 0.8,
+    colsample_bytree = 0.8)
+  
+  cv <- xgb.cv(
+    params = params,
+    data = dtrain,
+    nrounds = 150,
+    early_stopping_rounds = 10,
+    verbose = 0L,
+    maximize = TRUE,
+    showsd = TRUE,
+    folds = folds,
+    metrics = list("auc"),
+    prediction = TRUE
+  )
+  
+  list(Score = cv$evaluation_log$test_auc_mean[cv$best_iteration],
+       Pred = cv$pred)
+}
+
+
+xgb_bayes_model <- BayesianOptimization(
+  xgb_cv_bayes,
+  bounds = list(gamma = c(0, 10)),
+  init_grid_dt = NULL,
+  init_points = 10,  # number of random points to start search
+  n_iter = 20, # number of iterations after initial random points are set
+  acq = 'ucb',
+  kappa = 2.576,
+  eps = 0.0,
+  verbose = TRUE
+)
+```
