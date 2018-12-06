@@ -427,7 +427,9 @@ keeps <- c(
   )
 
 shots_features <- shots[keeps] %>%
-  mutate_at(vars(half, game_state, n_shots, zone_start_id, zone_id), as.integer)
+  mutate_at(vars(half, game_state, n_shots, zone_start_id, zone_id), as.integer) %>%
+  mutate(shot_id = row_number()) %>%
+  select(shot_id, everything())
 
 # Save output -------------------------------------------------------------
 

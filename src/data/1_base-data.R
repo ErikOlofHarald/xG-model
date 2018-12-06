@@ -64,11 +64,9 @@ events_clean <- events %>%
     action_id != 22000,                           # Ball receiving
     floor(action_id / 1000) != 23,                # Playing in goal scoring attack
     floor(action_id / 1000) != 25,                # Average positions
-    # floor(action_id / 1000) != 26,                # Crosses
     !(action_id %in% c(28010, 28011, 28012)),     # Diagonal passes (labels on main passes)
     action_id != 28020,                           # Key interception
     action_id != 28030,                           # Pass behind player. Rarely filled in
-    # floor(action_id / 10) != 2804,                # Set piece atttack crosses
     action_id != 28070,                           # Bicycle kick. Rarely filled in
     !(action_id %in% c(28050, 28060, 28080)),     # Players that created offside trap etc.
     action_id != 28100,                           # At high speed - Rarely related to shots and passes
@@ -76,6 +74,25 @@ events_clean <- events %>%
     floor(action_id / 1000) != 29,                # Points on the video
     action_id < 30000                             # action_id > 30000 not needed
   )
+
+# Set all penalty kicks to the same coordinates as some are of and they should all be taken from the same spot
+idx <- which(events_clean$standart_id == 6)
+events_clean$pos_x[idx] <- (105 - 10.97)
+events_clean$pos_y[idx] <- 34
+
+# Indirect free kicks cannot be shots on goal, violation of rules
+idx <- which(events_clean$standart_id == 3 & floor(events_clean$action_id / 1000) %in% c(4, 8))
+events_clean$standart_id[idx] <- 4L
+
+# Direct free kicks inside penalty area is a violation of rules, remove
+idx <- with(events_clean, which(standart_id == 4 & pos_x > (105 - 16.5) & (pos_y > (34 - 16.5) & pos_y < (34 + 16.5))))
+events_clean <- events_clean[-idx, ]
+
+# Remove duplicates
+events_clean <- events_clean %>%
+  group_by(match_id, player_id, half, second, action_id) %>%
+  filter(row_number() == 1) %>%
+  ungroup()
 
 saveRDS(events_clean, here("data", "interim", "base-data.rds"))
 

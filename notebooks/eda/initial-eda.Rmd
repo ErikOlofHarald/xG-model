@@ -24,7 +24,9 @@ All features
 features
 ```
 
-Character features
+# Average by
+
+## Character features
 
 ```{r fig.width=9.5, fig.height=28.5}
 fchars <-  names(shots)[lapply(shots, is.character) == TRUE]
@@ -51,7 +53,7 @@ rm(v, df, tmp, i)
 do.call("grid.arrange", c(plots, ncol = 2))
 ```
 
-Numeric features
+## Numeric features
 
 ```{r fig.width=9.5, fig.height=25}
 fnums <-  names(shots)[lapply(shots, is.double) == TRUE]
@@ -78,9 +80,41 @@ rm(v, df, tmp, i)
 do.call("grid.arrange", c(plots, ncol = 2))
 ```
 
+# Histograms
+
+```{r fig.width=9.5, fig.height=25}
+plots <- vector("list", length(fnums))
+
+for (i in seq_along(fnums)) {
+  v <- fnums[i]
+  plots[[i]] <- ggplot(shots, aes_string(v)) +
+    geom_histogram(bins = 40, na.rm = TRUE) +
+    theme(axis.text.x = element_text(size = 6))
+}
+
+rm(v, i)
+
+do.call("grid.arrange", c(plots, ncol = 2))
+```
 
 
+# Coordinates
 
+## By standart
+
+```{r}
+ggplot(shots, aes(pos_x, pos_y)) +
+  geom_point() +
+  facet_wrap(~ standart, ncol = 3)
+```
+
+# By attack type
+
+```{r}
+ggplot(shots, aes(pos_x, pos_y)) +
+  geom_point() +
+  facet_wrap(~ attack_type, ncol = 3)
+```
 
 
 
